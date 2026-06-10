@@ -1,4 +1,5 @@
 import os
+import cv2
 import argparse
 import kagglehub
 from dotenv import load_dotenv
@@ -21,9 +22,9 @@ TOKENIZER_PATH = os.path.join(GEMMA_PATH, 'tokenizer.model')
 
 def main():
     print('INIT')
-    model = gm.nn.IntWrapper(model=gm.nn.Gemma3_4B(text_only=True), dtype=jnp.int8)
+    model = model=gm.nn.Gemma3_4B(text_only=False)
     print('MODEL_LOAD')
-    params = peft.quantize(gm.ckpts.load_params(CKPT_PATH), method='INT8', checkpoint_kernel_key='w')
+    params = gm.ckpts.load_params(CKPT_PATH)
     print('TOKENIZER_LOAD')
     tokenizer = gm.text.Gemma3Tokenizer(TOKENIZER_PATH)
 
@@ -33,13 +34,16 @@ def main():
     params=params,
     multi_turn=True,
     tokenizer=tokenizer,
+    print_stream=True
     )
 
     stop = False
     while not stop:
         text = input("enter prompt, 'q' to quit:\n")
         if text not in ['q', 'quit', 'exit']:
-            print(chatbot.chat(text))
+            # image = cv2.resize(cv2.cvtColor(cv2.imread('/home/balon/source/ML_HUB_2025/runs/pcb2pcb_classifier/cvit_results.png'), cv2.COLOR_BGR2RGB), (896, 896), interpolation=cv2.INTER_CUBIC)
+            # chatbot.chat(f'{text} <|image|>', images=[image])
+            chatbot.chat(text)
         else: 
             stop = True
 
