@@ -1,0 +1,11 @@
+[project]
+name = "gen26"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "gemma>=4.0.1",
+    "jax[cuda12]>=0.10.1",
+    "kagglehub>=1.0.1",
+]
