@@ -1,12 +1,15 @@
 import os
+import argparse
 import kagglehub
 from dotenv import load_dotenv
 
 os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"]="0.9"
-os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"]="false"
+# os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"]="false"
+os.environ["XLA_PYTHON_CLIENT_ALLOCATOR"]="vmm"
 # os.environ["XLA_PYTHON_CLIENT_ALLOCATOR"]="platform"
 
-from gemma import gm
+from gemma import gm, peft
+from jax import numpy as jnp
 
 load_dotenv('/home/balon/source/GEN26/.env')
 print(os.environ['KAGGLE_USERNAME'])
@@ -18,9 +21,9 @@ TOKENIZER_PATH = os.path.join(GEMMA_PATH, 'tokenizer.model')
 
 def main():
     print('INIT')
-    model = gm.nn.Gemma3_4B()
+    model = gm.nn.IntWrapper(model=gm.nn.Gemma3_4B(text_only=True), dtype=jnp.int8)
     print('MODEL_LOAD')
-    params = gm.ckpts.load_params(CKPT_PATH)
+    params = peft.quantize(gm.ckpts.load_params(CKPT_PATH), method='INT8', checkpoint_kernel_key='w')
     print('TOKENIZER_LOAD')
     tokenizer = gm.text.Gemma3Tokenizer(TOKENIZER_PATH)
 

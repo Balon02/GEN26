@@ -4,7 +4,7 @@ from dotenv import load_dotenv
 
 os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"]="0.9"
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"]="false"
-os.environ["XLA_PYTHON_CLIENT_ALLOCATOR"]="platform"
+# os.environ["XLA_PYTHON_CLIENT_ALLOCATOR"]="platform"
 
 from jax import numpy as jnp
 from gemma import gm
