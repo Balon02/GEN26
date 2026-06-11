@@ -1,6 +1,5 @@
-def main():
-    print("Hello from gen26!")
+from gen26.cli import main
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

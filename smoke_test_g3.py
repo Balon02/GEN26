@@ -4,7 +4,7 @@ import argparse
 import kagglehub
 from dotenv import load_dotenv
 
-os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"]="0.9"
+os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"]="1.0"
 # os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"]="false"
 os.environ["XLA_PYTHON_CLIENT_ALLOCATOR"]="vmm"
 # os.environ["XLA_PYTHON_CLIENT_ALLOCATOR"]="platform"
@@ -13,7 +13,6 @@ from gemma import gm, peft
 from jax import numpy as jnp
 
 load_dotenv('/home/balon/source/GEN26/.env')
-print(os.environ['KAGGLE_USERNAME'])
 
 GEMMA_PATH = kagglehub.model_download("google/gemma-3/flax/gemma3-4b-it")
 CKPT_PATH = os.path.join(GEMMA_PATH, "gemma3-4b-it")
@@ -34,7 +33,8 @@ def main():
     params=params,
     multi_turn=True,
     tokenizer=tokenizer,
-    print_stream=True
+    print_stream=True,
+    cache_length=10240,
     )
 
     stop = False
