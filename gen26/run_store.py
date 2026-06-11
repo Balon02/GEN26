@@ -39,9 +39,11 @@ class RunStore:
             "updated_at": now_iso(),
             "runtime": {
                 "model": "google/gemma-3/flax/gemma3-4b-it",
+                "sampler": "gm.text.Sampler",
                 "cache_length": runtime.cache_length,
                 "safe_input_tokens": runtime.safe_input_tokens,
                 "max_output_tokens": runtime.max_output_tokens,
+                "final_output_tokens": getattr(runtime, "final_output_tokens", runtime.max_output_tokens),
                 "image_size": runtime.image_size,
                 "image_tokens": 256,
             },
@@ -50,6 +52,8 @@ class RunStore:
             "node_states": node_states(root),
             "chunks": chunk_records(chunks),
             "completed_summaries": [],
+            "memory_deltas": [],
+            "image_notes": [],
             "rolling_memory": "",
             "last_completed_chunk": 0,
         }
@@ -107,6 +111,8 @@ class RunStore:
                     "completed_at": completed[index].get("completed_at"),
                     "prompt_stats": completed[index].get("prompt_stats", {}),
                     "summary": completed[index].get("summary", ""),
+                    "memory_delta": completed[index].get("memory_delta", ""),
+                    "image_prepass": completed[index].get("image_prepass", []),
                 }
             )
 
@@ -115,6 +121,8 @@ class RunStore:
         self.state["chunks"] = new_records
         self.state["last_completed_chunk"] = prefix
         self.state["completed_summaries"] = self.state.get("completed_summaries", [])[:prefix]
+        self.state["memory_deltas"] = memory_deltas_for_prefix(completed, prefix)
+        self.state["image_notes"] = image_notes_for_prefix(new_records, prefix)
         self.state["status"] = "running"
         self.save()
         self.log("plan_updated", plan_version=self.state["plan_version"], resume_at=prefix + 1)
@@ -133,6 +141,7 @@ class RunStore:
         chunk: ChunkPlan,
         summary: str,
         rolling_memory: str,
+        memory_deltas: list[str] | None = None,
     ) -> None:
         record = self.chunk_record(chunk.index)
         record["status"] = "complete"
@@ -143,6 +152,9 @@ class RunStore:
         while len(summaries) < chunk.index:
             summaries.append("")
         summaries[chunk.index - 1] = summary
+        if memory_deltas is not None:
+            self.state["memory_deltas"] = list(memory_deltas)
+            record["memory_delta"] = last_delta_for_chunk(memory_deltas, chunk.index)
         self.state["rolling_memory"] = rolling_memory
         self.save()
         self.log("chunk_completed", chunk=chunk.index, summary_chars=len(summary))
@@ -182,6 +194,7 @@ class RunStore:
         image_index: int,
         image_name: str,
         summary_chars: int,
+        note: str = "",
     ) -> None:
         record = self.chunk_record(chunk_index)
         for image_record in reversed(record.get("image_prepass", [])):
@@ -189,7 +202,12 @@ class RunStore:
                 image_record["status"] = "complete"
                 image_record["completed_at"] = now_iso()
                 image_record["summary_chars"] = summary_chars
+                image_record["note"] = note
                 break
+        if note:
+            notes = self.state.setdefault("image_notes", [])
+            if note not in notes:
+                notes.append(note)
         self.save()
         self.log(
             "image_completed",
@@ -272,9 +290,11 @@ class RunStore:
         self.save()
         self.log("final_failed", error_type=type(error).__name__, error=str(error))
 
-    def finish(self, final_abstract: str) -> None:
+    def finish(self, final_abstract: str, final_product_file: Path | None = None) -> None:
         self.state["status"] = "complete"
         self.state["final_abstract_chars"] = len(final_abstract)
+        if final_product_file is not None:
+            self.state["final_product_file"] = str(final_product_file)
         self.save()
         self.log("run_completed")
 
@@ -312,6 +332,33 @@ def chunk_records(chunks: list[ChunkPlan]) -> list[dict[str, Any]]:
 
 def chunk_signature(chunk: ChunkPlan) -> list[int]:
     return [node.order for node in chunk.nodes]
+
+
+def last_delta_for_chunk(memory_deltas: list[str], chunk_index: int) -> str:
+    prefix = f"Chunk {chunk_index}:"
+    for delta in reversed(memory_deltas):
+        if delta.startswith(prefix):
+            return delta[len(prefix) :].strip()
+    return ""
+
+
+def memory_deltas_for_prefix(completed: list[dict[str, Any]], prefix: int) -> list[str]:
+    deltas = []
+    for chunk in completed[:prefix]:
+        delta = chunk.get("memory_delta")
+        if delta:
+            deltas.append(f"Chunk {chunk['index']}: {delta}")
+    return deltas
+
+
+def image_notes_for_prefix(chunk_records_: list[dict[str, Any]], prefix: int) -> list[str]:
+    notes = []
+    for chunk in chunk_records_[:prefix]:
+        for image in chunk.get("image_prepass", []):
+            note = image.get("note")
+            if note:
+                notes.append(note)
+    return notes
 
 
 def node_states(root: PaperNode) -> list[dict[str, Any]]:

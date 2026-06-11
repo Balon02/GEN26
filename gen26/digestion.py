@@ -9,8 +9,11 @@ from gen26.paper_tree import IncludeStatus, PaperNode
 
 IMAGE_TOKENS = 256
 MEMORY_DELTA_TOKEN_LIMIT = 260
-MEMORY_COMPACTION_THRESHOLD = 0.85
 MAX_RAW_IMAGES_PER_CHUNK_CALL = 1
+FINAL_SUMMARY_TOKEN_LIMIT = 700
+FINAL_IMAGE_NOTE_TOKEN_LIMIT = 1200
+FINAL_MEMORY_DELTA_TOKEN_LIMIT = 3000
+EMERGENCY_MEMORY_TARGET_TOKENS = 2200
 
 
 @dataclass
@@ -31,6 +34,8 @@ class DigestionResult:
     chunk_summaries: list[str]
     final_abstract: str
     rolling_memory: RollingMemory
+    image_notes: list[str]
+    memory_deltas: list[str]
 
 
 def digest_chunks(
@@ -46,6 +51,8 @@ def digest_chunks(
 ) -> DigestionResult:
     memory = initial_memory or RollingMemory()
     chunk_summaries: list[str] = list(initial_summaries or [])
+    memory_deltas: list[str] = load_initial_memory_deltas(run_store, chunk_summaries)
+    image_notes: list[str] = load_initial_image_notes(run_store)
     output_file.parent.mkdir(parents=True, exist_ok=True)
     if not append_output:
         output_file.write_text("# Paper Digestion\n\n", encoding="utf-8")
@@ -124,7 +131,7 @@ def digest_chunks(
             with output_file.open("a", encoding="utf-8") as stream_file:
                 response = runtime.chat(
                     prompt,
-                    images=[image.array for image in chunk_images],
+                    images=image_arrays_or_none(chunk_images),
                     stream_file=stream_file,
                 )
         except Exception as exc:
@@ -132,58 +139,80 @@ def digest_chunks(
                 run_store.chunk_failed(chunk, exc)
             raise
         if not response:
-            response = "[streamed response was not returned by ChatSampler]"
+            response = "[streamed response was not returned by Sampler]"
             append_markdown(output_file, response)
+        new_durable_additions = "none"
         try:
             local_summary = extract_section(response, "LOCAL_SUMMARY") or response
             chunk_summaries.append(bound_text(runtime, local_summary, 350))
 
             memory_delta = extract_section(response, "MEMORY_DELTA")
             if useful_memory_delta(memory_delta):
+                bounded_delta = bound_text(runtime, memory_delta, MEMORY_DELTA_TOKEN_LIMIT)
+                new_durable_additions = bounded_delta
                 memory.text = append_memory_delta(
                     memory.text,
                     chunk.index,
-                    bound_text(runtime, memory_delta, MEMORY_DELTA_TOKEN_LIMIT),
+                    bounded_delta,
                 )
-
-            if should_compact_memory(runtime, memory.text, rolling_memory_token_limit):
-                memory.text = compact_memory(
-                    runtime,
-                    memory.text,
-                    rolling_memory_token_limit,
-                    output_file,
-                    run_store,
-                )
+                memory_deltas.append(f"Chunk {chunk.index}: {bounded_delta}")
         except Exception as exc:
             if run_store is not None:
                 run_store.chunk_failed(chunk, exc)
             raise
+        image_notes.extend(
+            note for note in image_summaries if note not in image_notes
+        )
 
         append_markdown(
             output_file,
-            "\n\n### Rolling Memory After Chunk\n\n"
-            f"{memory.text}\n\n",
+            "\n\n### New Durable Additions\n\n"
+            f"{new_durable_additions}\n\n"
+            "### State Size After Chunk\n\n"
+            f"- Rolling memory tokens: {runtime.count_tokens(memory.text)}\n"
+            f"- Memory deltas: {len(memory_deltas)}\n"
+            f"- Image notes: {len(image_notes)}\n\n",
         )
         if run_store is not None:
-            run_store.chunk_completed(chunk, chunk_summaries[-1], memory.text)
+            run_store.chunk_completed(
+                chunk,
+                chunk_summaries[-1],
+                memory.text,
+                memory_deltas=memory_deltas,
+            )
 
     print("\n\n=== FINAL ABSTRACT ===", flush=True)
-    final_prompt = build_final_prompt_that_fits(runtime, memory, chunk_summaries)
-    final_tokens = runtime.count_tokens(final_prompt)
+    if run_store is not None:
+        image_notes = load_initial_image_notes(run_store)
+    final_prompt = build_final_prompt_that_fits(
+        runtime,
+        memory,
+        chunk_summaries,
+        memory_deltas,
+        image_notes,
+        output_file,
+        run_store,
+    )
+    final_tokens = count_prompt_tokens(runtime, final_prompt)
     if run_store is not None:
         run_store.final_started(final_tokens)
     append_markdown(output_file, "## Final Pass\n\n")
     try:
         check_text_prompt_budget(runtime, final_prompt, "final abstract")
         with output_file.open("a", encoding="utf-8") as stream_file:
-            final_abstract = runtime.chat(final_prompt, stream_file=stream_file)
+            final_abstract = runtime.chat(
+                final_prompt,
+                stream_file=stream_file,
+                max_new_tokens=getattr(runtime, "final_output_tokens", None),
+            )
     except Exception as exc:
         if run_store is not None:
             run_store.final_failed(exc)
         raise
     if not final_abstract:
-        final_abstract = "[streamed final abstract was not returned by ChatSampler]"
+        final_abstract = "[streamed final abstract was not returned by Sampler]"
         append_markdown(output_file, final_abstract)
+    final_product_file = write_final_product_file(output_file, final_abstract)
 
     append_markdown(
         output_file,
@@ -191,12 +220,14 @@ def digest_chunks(
         f"{memory.text}\n",
     )
     if run_store is not None:
-        run_store.finish(final_abstract)
+        run_store.finish(final_abstract, final_product_file=final_product_file)
 
     return DigestionResult(
         chunk_summaries=chunk_summaries,
         final_abstract=final_abstract,
         rolling_memory=memory,
+        image_notes=image_notes,
+        memory_deltas=memory_deltas,
     )
 
 
@@ -245,10 +276,38 @@ def build_chunk_prompt(
 def build_final_prompt(
     memory: RollingMemory,
     chunk_summaries: list[str],
+    memory_deltas: list[str],
+    image_notes: list[str],
 ) -> str:
     summaries = "\n\n".join(
         f"CHUNK {index} SUMMARY:\n{summary}"
         for index, summary in enumerate(chunk_summaries, start=1)
+    )
+    deltas = "\n\n".join(memory_deltas) if memory_deltas else "none"
+    images = "\n\n".join(image_notes) if image_notes else "none"
+    return (
+        "Write a detailed final paper digest from the accumulated digestion "
+        "state. Stay faithful to the paper and avoid unsupported claims. The "
+        "output should be substantially detailed: aim for 1200-1800 words if "
+        "the supplied notes support it. Do not produce a short abstract unless "
+        "there is too little source material.\n\n"
+        "Final rolling memory:\n"
+        f"{memory.text}\n\n"
+        "Durable memory deltas, ordered:\n"
+        f"{deltas}\n\n"
+        "Ordered local summaries:\n"
+        f"{summaries}\n\n"
+        "Figure/table image notes, kept separate from memory:\n"
+        f"{images}\n\n"
+        "Return exactly these sections:\n"
+        "DETAILED_DIGEST:\n"
+        "KEY_CONTRIBUTIONS:\n"
+        "METHOD_AND_ARCHITECTURE:\n"
+        "TRAINING_AND_EVALUATION:\n"
+        "RESULTS:\n"
+        "FIGURES_AND_TABLES:\n"
+        "LIMITATIONS_AND_FUTURE_WORK:\n"
+        "SHORT_SUMMARY:\n"
     )
 
 
@@ -269,7 +328,7 @@ def digest_images_sequentially(
     context = bound_text(runtime, format_chunk_text(chunk), 900)
     for index, image in enumerate(images, start=1):
         prompt = build_image_prompt(chunk, image.path.name, context)
-        prompt_tokens = runtime.count_tokens(prompt)
+        prompt_tokens = count_prompt_tokens(runtime, prompt)
         if run_store is not None:
             run_store.image_started(chunk.index, index, image.path.name, prompt_tokens)
         append_markdown(
@@ -283,7 +342,7 @@ def digest_images_sequentially(
             with output_file.open("a", encoding="utf-8") as stream_file:
                 response = runtime.chat(
                     prompt,
-                    images=[image.array],
+                    images=image_arrays_or_none([image]),
                     stream_file=stream_file,
                 )
         except Exception as exc:
@@ -292,38 +351,35 @@ def digest_images_sequentially(
             raise
         summary = extract_section(response or "", "IMAGE_SUMMARY") or response or ""
         summary = bound_text(runtime, summary.strip(), 180)
-        summaries.append(f"Image {index} ({image.path.name}): {summary}")
+        note = f"Chunk {chunk.index} image {index} ({image.path.name}): {summary}"
+        summaries.append(note)
         if run_store is not None:
-            run_store.image_completed(chunk.index, index, image.path.name, len(summary))
+            run_store.image_completed(
+                chunk.index,
+                index,
+                image.path.name,
+                len(summary),
+                note=note,
+            )
         append_markdown(output_file, "\n\n")
     return summaries
 
 
 def build_image_prompt(chunk: ChunkPlan, image_name: str, context: str) -> str:
     return (
-        "Read this research-paper figure/table image. Use the surrounding text "
-        "only as context; describe what is actually visible. Keep the summary "
-        "short and factual, and note if the image is unreadable.\n\n"
+        "Read this research-paper figure/table image in the context of the "
+        "paper. Do not describe the image exhaustively. Explain what the image "
+        "contributes to the paper: the claim, evidence, or conclusion a reader "
+        "should take from it. Preserve only visual details needed for the final "
+        "paper digest. If the image is unreadable, say so briefly.\n\n"
         f"Chunk {chunk.index}: {chunk.title()}\n"
         f"Image file: {image_name}\n\n"
         "Surrounding chunk text excerpt:\n"
         f"{context}\n\n"
         "Image payload:\n"
         "<|image|>\n\n"
-        "Return exactly this section:\n"
+        "Return exactly this section, in 60-100 words:\n"
         "IMAGE_SUMMARY:\n"
-    )
-    return (
-        "Write the final abstract from the accumulated digestion state. Stay "
-        "faithful to the paper and avoid unsupported claims.\n\n"
-        "Final rolling memory:\n"
-        f"{memory.text}\n\n"
-        "Ordered local summaries:\n"
-        f"{summaries}\n\n"
-        "Return exactly these sections:\n"
-        "FINAL_ABSTRACT:\n"
-        "SHORT_SUMMARY:\n"
-        "STRUCTURED_NOTES:\n"
     )
 
 
@@ -331,14 +387,54 @@ def build_final_prompt_that_fits(
     runtime,
     memory: RollingMemory,
     chunk_summaries: list[str],
+    memory_deltas: list[str],
+    image_notes: list[str],
+    output_file: Path,
+    run_store=None,
 ) -> str:
-    for token_limit in (350, 220, 140, 90):
-        bounded = [bound_text(runtime, summary, token_limit) for summary in chunk_summaries]
-        prompt = build_final_prompt(memory, bounded)
-        if runtime.count_tokens(prompt) <= runtime.safe_input_tokens:
+    memory_text = memory.text
+    for summary_limit in (FINAL_SUMMARY_TOKEN_LIMIT, 500, 350, 220):
+        bounded_summaries = [
+            bound_text(runtime, summary, summary_limit)
+            for summary in chunk_summaries
+        ]
+        bounded_deltas = bound_list_by_tokens(
+            runtime,
+            memory_deltas,
+            FINAL_MEMORY_DELTA_TOKEN_LIMIT,
+        )
+        bounded_images = bound_list_by_tokens(
+            runtime,
+            image_notes,
+            FINAL_IMAGE_NOTE_TOKEN_LIMIT,
+        )
+        prompt = build_final_prompt(
+            RollingMemory(memory_text),
+            bounded_summaries,
+            bounded_deltas,
+            bounded_images,
+        )
+        if count_prompt_tokens(runtime, prompt) <= runtime.safe_input_tokens:
+            return prompt
+
+    compacted_memory = compact_memory(
+        runtime,
+        memory_text,
+        EMERGENCY_MEMORY_TARGET_TOKENS,
+        output_file,
+        run_store,
+    )
+    for summary_limit in (350, 220, 140):
+        prompt = build_final_prompt(
+            RollingMemory(compacted_memory),
+            [bound_text(runtime, summary, summary_limit) for summary in chunk_summaries],
+            bound_list_by_tokens(runtime, memory_deltas, 1800),
+            bound_list_by_tokens(runtime, image_notes, 800),
+        )
+        if count_prompt_tokens(runtime, prompt) <= runtime.safe_input_tokens:
             return prompt
     raise ValueError(
-        "Final abstract prompt does not fit even after compacting chunk summaries."
+        "Final digest prompt does not fit even after emergency compaction."
     )
 
 
@@ -416,9 +512,18 @@ def extract_section(text: str, section_name: str) -> str:
         "MEMORY_DELTA:",
         "UPDATED_ROLLING_MEMORY:",
         "COMPACTED_ROLLING_MEMORY:",
+        "DETAILED_DIGEST:",
+        "KEY_CONTRIBUTIONS:",
+        "METHOD_AND_ARCHITECTURE:",
+        "TRAINING_AND_EVALUATION:",
+        "RESULTS:",
+        "FIGURES_AND_TABLES:",
+        "LIMITATIONS_AND_FUTURE_WORK:",
+        "SHORT_SUMMARY:",
         "IMPORTANT_CLAIMS_RESULTS:",
         "LIMITATIONS_OR_UNCERTAINTIES:",
         "FIGURES_TABLES_USED:",
+        "IMAGE_SUMMARY:",
     ):
         index = text.find(candidate, start)
         if index != -1:
@@ -450,10 +555,48 @@ def append_memory_delta(memory_text: str, chunk_index: int, delta: str) -> str:
     )
 
 
-def should_compact_memory(runtime, memory_text: str, token_limit: int) -> bool:
-    return runtime.count_tokens(memory_text) >= round(
-        token_limit * MEMORY_COMPACTION_THRESHOLD
-    )
+def load_initial_memory_deltas(run_store, chunk_summaries: list[str]) -> list[str]:
+    if run_store is None:
+        return []
+    deltas = run_store.state.get("memory_deltas")
+    if isinstance(deltas, list):
+        return list(deltas)
+    chunks = run_store.state.get("chunks", [])[: len(chunk_summaries)]
+    recovered = []
+    for chunk in chunks:
+        delta = chunk.get("memory_delta")
+        if delta:
+            recovered.append(f"Chunk {chunk['index']}: {delta}")
+    return recovered
+
+
+def load_initial_image_notes(run_store) -> list[str]:
+    if run_store is None:
+        return []
+    notes = run_store.state.get("image_notes")
+    if isinstance(notes, list):
+        return list(notes)
+    recovered = []
+    for chunk in run_store.state.get("chunks", []):
+        for image in chunk.get("image_prepass", []):
+            note = image.get("note")
+            if note:
+                recovered.append(note)
+    return recovered
+
+
+def bound_list_by_tokens(runtime, items: list[str], token_limit: int) -> list[str]:
+    selected: list[str] = []
+    for item in items:
+        candidate = selected + [item]
+        if runtime.count_tokens("\n\n".join(candidate)) <= token_limit:
+            selected.append(item)
+            continue
+        remaining = token_limit - runtime.count_tokens("\n\n".join(selected))
+        if remaining > 40:
+            selected.append(bound_text(runtime, item, remaining))
+        break
+    return selected
 
 
 def compact_memory(
@@ -518,17 +661,20 @@ def prompt_component_stats(
     memory: RollingMemory,
     images,
     skipped_images: list[str],
+    image_summaries: list[str] | None = None,
 ) -> dict[str, int]:
     chunk_text = format_chunk_text(chunk)
+    prompt_tokens = count_prompt_tokens(runtime, prompt)
+    image_summary_text = "\n".join(image_summaries or [])
     return {
-        "prompt_text_tokens": runtime.count_tokens(prompt),
+        "prompt_text_tokens": prompt_tokens,
         "chunk_text_tokens": runtime.count_tokens(chunk_text),
         "rolling_memory_tokens": runtime.count_tokens(memory.text),
+        "image_summary_tokens": runtime.count_tokens(image_summary_text),
         "image_count": len(images),
         "skipped_image_count": len(skipped_images),
         "image_tokens": len(images) * IMAGE_TOKENS,
-        "estimated_total_input_tokens": runtime.count_tokens(prompt)
-        + len(images) * IMAGE_TOKENS,
+        "estimated_total_input_tokens": prompt_tokens + len(images) * IMAGE_TOKENS,
         "safe_input_tokens": runtime.safe_input_tokens,
     }
 
@@ -546,7 +692,7 @@ def check_prompt_budget(runtime, prompt_stats: dict[str, int], chunk: ChunkPlan)
 
 
 def check_text_prompt_budget(runtime, prompt: str, label: str) -> None:
-    tokens = runtime.count_tokens(prompt)
+    tokens = count_prompt_tokens(runtime, prompt)
     if tokens > runtime.safe_input_tokens:
         raise ValueError(
             f"The {label} prompt has {tokens} tokens, over the safe limit "
@@ -557,3 +703,25 @@ def check_text_prompt_budget(runtime, prompt: str, label: str) -> None:
 def append_markdown(path: Path, text: str) -> None:
     with path.open("a", encoding="utf-8") as file:
         file.write(text)
+
+
+def write_final_product_file(output_file: Path, final_abstract: str) -> Path:
+    final_file = output_file.with_name(f"{output_file.stem}.final.md")
+    final_file.write_text(
+        "# Final Product\n\n"
+        f"{final_abstract.strip()}\n",
+        encoding="utf-8",
+    )
+    return final_file
+
+
+def image_arrays_or_none(images) -> list[object] | None:
+    if not images:
+        return None
+    return [image.array for image in images]
+
+
+def count_prompt_tokens(runtime, prompt: str) -> int:
+    if hasattr(runtime, "count_prompt_tokens"):
+        return runtime.count_prompt_tokens(prompt)
+    return runtime.count_tokens(prompt)

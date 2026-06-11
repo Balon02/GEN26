@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import os
 import sys
-from contextlib import redirect_stdout
-from io import StringIO
 from pathlib import Path
 
 
@@ -12,6 +10,7 @@ os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "1.0"
 os.environ["XLA_PYTHON_CLIENT_ALLOCATOR"] = "vmm"
 
 import kagglehub  # noqa: E402
+import numpy as np  # noqa: E402
 from dotenv import load_dotenv  # noqa: E402
 from gemma import gm  # noqa: E402
 
@@ -37,24 +36,36 @@ class GemmaDigestRuntime:
         self.cache_length = 10240
         self.safe_input_tokens = 7800
         self.max_output_tokens = 768
+        self.final_output_tokens = 3072
         self.image_height = self.model.config.vision_encoder.image_height
         self.image_width = self.model.config.vision_encoder.image_width
         if self.image_height != self.image_width:
             raise ValueError("Expected square Gemma image input.")
         self.image_size = self.image_height
 
-        print("CHAT_SETUP", flush=True)
-        self._new_chatbot()
-
-    def _new_chatbot(self):
-        return gm.text.ChatSampler(
+        print("SAMPLER_SETUP", flush=True)
+        self.sampler = gm.text.Sampler(
             model=self.model,
             params=self.params,
-            multi_turn=True,
             tokenizer=self.tokenizer,
-            print_stream=True,
             cache_length=self.cache_length,
             max_out_length=self.max_output_tokens,
+        )
+        self.final_sampler = gm.text.Sampler(
+            model=self.model,
+            params=self.params,
+            tokenizer=self.tokenizer,
+            cache_length=self.cache_length,
+            max_out_length=self.final_output_tokens,
+        )
+
+    def format_prompt(self, prompt: str) -> str:
+        prompt = prompt.replace("<|image|>", "<start_of_image>")
+        return (
+            "<start_of_turn>user\n"
+            f"{prompt}"
+            "<end_of_turn>\n"
+            "<start_of_turn>model\n"
         )
 
     def count_tokens(self, text: str) -> int:
@@ -62,42 +73,76 @@ class GemmaDigestRuntime:
             return 0
         return len(self.tokenizer.encode(text, add_bos=True))
 
+    def count_prompt_tokens(self, prompt: str) -> int:
+        return len(self.tokenizer.encode(self.format_prompt(prompt), add_bos=True))
+
     def chat(
         self,
         prompt: str,
         images: list[object] | None = None,
         stream_file=None,
+        max_new_tokens: int | None = None,
     ) -> str:
-        chatbot = self._new_chatbot()
-        stream_capture = StringIO()
-        files = [sys.stdout, stream_capture]
-        if stream_file is not None:
-            files.append(stream_file)
-        with redirect_stdout(Tee(*files)):
-            if images:
-                response = chatbot.chat(
-                    prompt,
-                    images=images,
-                    max_new_tokens=self.max_output_tokens,
-                )
-            else:
-                response = chatbot.chat(prompt, max_new_tokens=self.max_output_tokens)
-        if response is None:
-            return stream_capture.getvalue().strip()
-        if hasattr(response, "text"):
-            return response.text
-        return str(response)
+        formatted = self.format_prompt(prompt)
+        sampler_images = normalize_images_for_sampler(images)
+        image_count = count_sampler_images(sampler_images)
+        validate_image_placeholders(formatted, image_count)
+        tokens: list[str] = []
+        output_tokens = max_new_tokens or self.max_output_tokens
+        sampler = self.final_sampler if output_tokens > self.max_output_tokens else self.sampler
+        stream = sampler.sample(
+            formatted,
+            images=sampler_images,
+            max_new_tokens=output_tokens,
+            stream=True,
+        )
+        for token in stream:
+            text = token.text if hasattr(token, "text") else str(token)
+            if text in {"<end_of_turn>", "<eos>"}:
+                continue
+            tokens.append(text)
+            sys.stdout.write(text)
+            sys.stdout.flush()
+            if stream_file is not None:
+                stream_file.write(text)
+                stream_file.flush()
+        return "".join(tokens).strip()
 
 
-class Tee:
-    def __init__(self, *files) -> None:
-        self.files = files
+def normalize_images_for_sampler(images: list[object] | object | None):
+    """Return image shape expected by Sampler for one unbatched prompt.
 
-    def write(self, text: str) -> int:
-        for file in self.files:
-            file.write(text)
-        return len(text)
+    `gm.text.Sampler.sample()` receives a plain string prompt here. Its internal
+    normalizer adds the batch dimension, so we must pass H,W,C or N,H,W,C.
+    Passing B,N,H,W,C would become 6D inside Gemma.
+    """
+    if images is None:
+        return None
+    array = np.asarray(images, dtype=np.uint8)
+    if array.ndim not in {3, 4}:
+        raise ValueError(
+            "Images must have shape H,W,C or N,H,W,C for one prompt; "
+            f"got {array.shape}."
+        )
+    if array.shape[-1] != 3:
+        raise ValueError(f"Expected RGB images with 3 channels; got {array.shape}.")
+    return array
 
-    def flush(self) -> None:
-        for file in self.files:
-            file.flush()
+
+def count_sampler_images(images) -> int:
+    if images is None:
+        return 0
+    if images.ndim == 3:
+        return 1
+    if images.ndim == 4:
+        return images.shape[0]
+    raise ValueError(f"Unexpected sampler image shape: {images.shape}.")
+
+
+def validate_image_placeholders(prompt: str, image_count: int) -> None:
+    placeholders = prompt.count("<start_of_image>")
+    if placeholders != image_count:
+        raise ValueError(
+            "Prompt/image mismatch: "
+            f"{placeholders} image placeholders for {image_count} images."
+        )
