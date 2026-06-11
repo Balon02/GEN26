@@ -41,6 +41,7 @@ def build_parser() -> argparse.ArgumentParser:
         ("tree", "Parse a LaTeX project and print the token-aware section tree."),
         ("budget", "Parse, pack selected nodes, and print a chunk budget report."),
         ("digest", "Run sequential Gemma digestion with rolling memory."),
+        ("digest-auto", "Run Gemma digestion using automatic top-level chunks."),
     ):
         subparser = subparsers.add_parser(name, help=help_text)
         subparser.add_argument("source", type=Path, help=".tex file, directory, or .tar.gz")
@@ -48,7 +49,7 @@ def build_parser() -> argparse.ArgumentParser:
             add_selection_args(subparser)
         if name == "budget":
             add_budget_args(subparser)
-        if name == "digest":
+        if name in {"digest", "digest-auto"}:
             add_digest_args(subparser)
     resume_parser = subparsers.add_parser(
         "resume",
@@ -119,6 +120,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.command == "digest":
         return run_digest(args)
+    if args.command == "digest-auto":
+        return run_digest_auto(args)
     if args.command == "resume":
         return run_resume(args)
 
@@ -210,6 +213,15 @@ def run_digest(args) -> int:
         return 0
     finally:
         source.cleanup()
+
+
+def run_digest_auto(args) -> int:
+    from gen26.auto import digest_auto
+
+    digest_auto(args.source, args.output)
+    print(f"\nMarkdown output: {args.output}", flush=True)
+    print(f"Final output: {args.output.with_name(args.output.stem + '.final.md')}", flush=True)
+    return 0
 
 
 def run_resume(args) -> int:

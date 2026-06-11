@@ -12,6 +12,7 @@ uv run python main.py ingest arXiv-1706.03762v7.tar.gz
 uv run python main.py tree arXiv-1706.03762v7.tar.gz
 uv run python main.py budget arXiv-1706.03762v7.tar.gz
 uv run python main.py digest arXiv-1706.03762v7.tar.gz --output digestion.md
+uv run python main.py digest-auto arXiv-1706.03762v7.tar.gz --output digestion.md
 uv run python main.py resume digestion.md
 ```
 
@@ -74,6 +75,38 @@ input budget.
 
 The final pass uses a larger generation budget than local chunk passes and asks
 for a detailed structured digest rather than a short abstract.
+
+## Automatic Digestion
+
+For notebook or Colab-style usage, import the automatic handle and pass source
+and output paths:
+
+```python
+from gen26 import digest_auto
+
+digest_auto("attention.tar.gz", "attention.md")
+```
+
+The automatic plan bundles each included top-level paper node into one chunk,
+while preserving parser defaults such as bibliography exclusion. It prints the
+full chunk list and token budget before generation starts. If any top-level
+chunk exceeds the safe chunk text budget, it raises before streaming model
+output.
+
+The same sidecar files are written next to the output:
+
+```text
+attention.md
+attention.final.md
+attention.json
+attention.log.jsonl
+```
+
+The CLI shortcut uses the same function:
+
+```bash
+uv run python main.py digest-auto attention.tar.gz --output attention.md
+```
 
 Unsectioned top-level paragraphs are treated as front matter and excluded by
 default when the paper has real sections. Normal paragraph prose inside sections
