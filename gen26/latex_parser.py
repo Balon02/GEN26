@@ -5,6 +5,7 @@ import tarfile
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
 
 from pylatexenc.latex2text import LatexNodes2Text
 from pylatexenc.latexwalker import LatexEnvironmentNode, LatexMacroNode, LatexWalker
@@ -12,10 +13,8 @@ from pylatexenc.latexwalker import LatexEnvironmentNode, LatexMacroNode, LatexWa
 from gen26.paper_tree import (
     IncludeStatus,
     PaperNode,
-    estimate_output_budget,
     recompute_parent_totals,
 )
-from gen26.tokenizer import TokenCounter
 
 
 SECTION_LEVELS = {
@@ -47,17 +46,6 @@ BLOCK_ENVS = {
     "corollary",
     "thebibliography",
 }
-SECTION_RE = re.compile(
-    r"\\(?P<kind>part|chapter|section|subsection|subsubsection|paragraph)\*?"
-    r"(?:\[[^\]]*\])?\{(?P<title>(?:[^{}]|\{[^{}]*\})*)\}",
-    re.DOTALL,
-)
-BEGIN_RE = re.compile(
-    r"\\begin\{(?P<env>"
-    + "|".join(re.escape(env) for env in sorted(BLOCK_ENVS, key=len, reverse=True))
-    + r")\}",
-    re.DOTALL,
-)
 INPUT_RE = re.compile(r"\\(?:input|include)\{(?P<path>[^}]+)\}")
 CAPTION_RE = re.compile(
     r"\\caption(?:\[[^\]]*\])?\{(?P<caption>(?:[^{}]|\{[^{}]*\})*)\}",
@@ -70,6 +58,13 @@ GRAPHICS_RE = re.compile(
     re.DOTALL,
 )
 IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".pdf")
+
+
+class TokenCounter(Protocol):
+    name: str
+
+    def count(self, text: str) -> int:
+        ...
 
 
 @dataclass
@@ -163,14 +158,6 @@ def strip_comments(text: str) -> str:
     return "\n".join(lines)
 
 
-def parse_latex_project(path: Path, token_counter: TokenCounter) -> PaperNode:
-    source = load_latex_source(path)
-    try:
-        return parse_loaded_source(source, token_counter)
-    finally:
-        source.cleanup()
-
-
 def parse_loaded_source(source: LoadedSource, token_counter: TokenCounter) -> PaperNode:
     order = OrderCounter()
     body = document_body(source.text)
@@ -225,7 +212,6 @@ def parse_loaded_source(source: LoadedSource, token_counter: TokenCounter) -> Pa
     parse_blocks(content, root, order, source, token_counter)
     exclude_unsectioned_front_matter(root)
     recompute_parent_totals(root)
-    root.estimated_output_tokens = estimate_output_budget(root.token_count)
     return root
 
 
@@ -344,13 +330,6 @@ def section_title_source(node: LatexMacroNode) -> str:
         if arg is not None:
             return arg.latex_verbatim()
     return node.macroname
-
-
-def earliest(*matches: re.Match[str] | None) -> re.Match[str] | None:
-    found = [match for match in matches if match is not None]
-    if not found:
-        return None
-    return min(found, key=lambda match: match.start())
 
 
 def current_parent(stack: list[tuple[int, PaperNode]]) -> PaperNode:
@@ -488,7 +467,6 @@ def add_leaf(
 
 def count_and_attach(parent: PaperNode, node: PaperNode, token_counter: TokenCounter) -> None:
     node.token_count = token_counter.count(node.selectable_text())
-    node.estimated_output_tokens = estimate_output_budget(node.token_count)
     parent.add_child(node)
 
 
@@ -499,27 +477,6 @@ def latex_to_text(text: str) -> str:
     converted = re.sub(r"[ \t]+", " ", converted)
     converted = re.sub(r"\s+\n", "\n", converted)
     return converted.strip()
-
-
-def normalize_text(text: str) -> str:
-    text = normalize_refs(text)
-    text = re.sub(r"\\begin\{[^}]+\}|\\end\{[^}]+\}", "\n", text)
-    text = re.sub(r"\\caption(?:\[[^\]]*\])?\{((?:[^{}]|\{[^{}]*\})*)\}", r"\1", text)
-    text = re.sub(r"\\label\{[^}]+\}", "", text)
-    text = normalize_inline(text)
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    return text.strip()
-
-
-def normalize_inline(text: str) -> str:
-    text = normalize_refs(text)
-    text = re.sub(r"\\(?:emph|textbf|textit|texttt|mathrm)\{([^{}]*)\}", r"\1", text)
-    text = re.sub(r"\\[a-zA-Z]+\*?(?:\[[^\]]*\])?", "", text)
-    text = re.sub(r"[{}]", "", text)
-    text = re.sub(r"[ \t]+", " ", text)
-    text = re.sub(r"\s+\n", "\n", text)
-    text = re.sub(r"\n\s+", "\n", text)
-    return text.strip()
 
 
 def normalize_refs(text: str) -> str:

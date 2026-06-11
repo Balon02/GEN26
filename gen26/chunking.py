@@ -6,7 +6,6 @@ from gen26.paper_tree import (
     DigestMode,
     IncludeStatus,
     PaperNode,
-    recompute_parent_totals,
 )
 
 
@@ -73,48 +72,6 @@ def pack_chunks(
                 token_count=unit.token_count,
             )
         )
-    return chunks
-
-
-def pack_chunks_max_fill(root: PaperNode, budget: TokenBudget) -> list[ChunkPlan]:
-    limit = budget.chunk_text_tokens
-    if limit <= 0:
-        raise ValueError(
-            "Token budget leaves no room for chunk text after instructions and memory."
-        )
-
-    chunks: list[ChunkPlan] = []
-    current = ChunkPlan(index=1)
-    forced_split_leaf_orders = split_leaf_orders(root)
-
-    for node in selected_leaf_nodes(root):
-        if node.token_count > limit:
-            if current.nodes:
-                chunks.append(current)
-                current = ChunkPlan(index=len(chunks) + 1)
-            chunks.append(
-                ChunkPlan(
-                    index=len(chunks) + 1,
-                    nodes=[node],
-                    token_count=node.token_count,
-                )
-            )
-            continue
-
-        if current.nodes and current.token_count + node.token_count > limit:
-            chunks.append(current)
-            current = ChunkPlan(index=len(chunks) + 1)
-
-        current.nodes.append(node)
-        current.token_count += node.token_count
-
-        if node.order in forced_split_leaf_orders and current.nodes:
-            chunks.append(current)
-            current = ChunkPlan(index=len(chunks) + 1)
-
-    if current.nodes:
-        chunks.append(current)
-
     return chunks
 
 
@@ -185,64 +142,6 @@ def parse_default_level(level: str) -> int:
         allowed = ", ".join(sorted(NODE_LEVELS))
         raise ValueError(f"Unknown digest level {level!r}. Expected one of: {allowed}")
     return NODE_LEVELS[level]
-
-
-def split_leaf_orders(root: PaperNode) -> set[int]:
-    orders: set[int] = set()
-    for node in root.walk():
-        if not node.force_split_after:
-            continue
-        leaves = list(node.leaf_nodes())
-        if leaves:
-            orders.add(leaves[-1].order)
-    return orders
-
-
-def selected_leaf_nodes(root: PaperNode):
-    def visit(node: PaperNode, excluded: bool):
-        excluded = excluded or node.include_status == IncludeStatus.EXCLUDE
-        if not node.children:
-            if not excluded:
-                yield node
-            return
-        for child in node.children:
-            yield from visit(child, excluded)
-
-    yield from visit(root, False)
-
-
-def find_node(root: PaperNode, order: int) -> PaperNode:
-    for node in root.walk():
-        if node.order == order:
-            return node
-    raise ValueError(f"No node with order id {order:04d}")
-
-
-def apply_selection_edits(
-    root: PaperNode,
-    exclude_nodes: list[int] | None = None,
-    include_nodes: list[int] | None = None,
-    split_after: list[int] | None = None,
-    exclude_types: list[str] | None = None,
-    whole_nodes: list[int] | None = None,
-    split_nodes: list[int] | None = None,
-) -> None:
-    excluded_types = {node_type.lower() for node_type in exclude_types or []}
-    for node in root.walk():
-        if node.node_type.lower() in excluded_types:
-            node.include_status = IncludeStatus.EXCLUDE
-
-    for order in exclude_nodes or []:
-        find_node(root, order).include_status = IncludeStatus.EXCLUDE
-    for order in include_nodes or []:
-        find_node(root, order).include_status = IncludeStatus.INCLUDE
-    for order in split_after or []:
-        find_node(root, order).force_split_after = True
-    for order in whole_nodes or []:
-        find_node(root, order).digest_mode = DigestMode.WHOLE
-    for order in split_nodes or []:
-        find_node(root, order).digest_mode = DigestMode.SPLIT
-    recompute_parent_totals(root)
 
 
 def format_budget_report(chunks: list[ChunkPlan], budget: TokenBudget) -> str:

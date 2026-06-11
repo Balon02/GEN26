@@ -1,116 +1,28 @@
 # GEN26
 
-Local CLI experiments for turning arXiv-style LaTeX papers into token-aware
-Gemma digestion chunks.
+Local Gemma digestion for arXiv-style LaTeX papers.
 
-## Current CLI
+GEN26 parses a `.tex` file, a LaTeX project directory, or an arXiv-style
+`.tar.gz` archive into a token-aware paper tree. It then digests selected chunks
+sequentially with Gemma 3 4B IT, carrying forward append-only rolling memory and
+writing both streamed chunk output and a final presentable digest.
 
-Use the Gemma 3 tokenizer for real counts:
+## CLI
 
-```bash
-uv run python main.py ingest arXiv-1706.03762v7.tar.gz
-uv run python main.py tree arXiv-1706.03762v7.tar.gz
-uv run python main.py budget arXiv-1706.03762v7.tar.gz
-uv run python main.py digest arXiv-1706.03762v7.tar.gz --output digestion.md
-uv run python main.py digest-auto arXiv-1706.03762v7.tar.gz --output digestion.md
-uv run python main.py resume digestion.md
-```
-
-For parser-only checks without loading the Gemma tokenizer:
+Run the interactive curses planner:
 
 ```bash
-uv run python main.py --tokenizer approx ingest arXiv-1706.03762v7.tar.gz
-uv run python main.py --tokenizer approx tree arXiv-1706.03762v7.tar.gz
-uv run python main.py --tokenizer approx budget arXiv-1706.03762v7.tar.gz
+uv run python main.py digest attention.tar.gz --output attention.md
 ```
 
-Supported source inputs are a `.tex` file, a directory containing `.tex` files,
-or an arXiv-style `.tar.gz` archive. The parser resolves `\input{...}` and
-`\include{...}` and uses `pylatexenc` to build the section/environment
-structure. It records labels, references, captions, figures, token counts, and
-image paths on a simple `PaperNode` tree.
-
-## Streaming Digestion
-
-`digest` follows the same Gemma 3 model and JAX setup as `smoke_test_g3.py`:
-Gemma 3 4B IT, multimodal sampling, `cache_length=10240`, and the same JAX
-memory environment settings. The runtime uses the low-level `gm.text.Sampler`
-directly and formats each request as one explicit Gemma instruction prompt.
-
-The command first opens an interactive planner where you walk the paper tree,
-include or exclude subtrees, and choose whether nodes should be digested whole
-or split into children. It then streams each local chunk summary to the console
-and appends the same returned model output to a Markdown file:
+Resume an interrupted run from the Markdown output path:
 
 ```bash
-uv run python main.py digest arXiv-1706.03762v7.tar.gz \
-  --output digestion.md
+uv run python main.py resume attention.md
 ```
 
-The run also writes sidecar files next to the Markdown output:
-
-```text
-digestion.md         streamed summaries and final abstract
-digestion.final.md   final digest only, suitable for presentation
-digestion.json       run state, active plan, chunk statuses, memory, image notes
-digestion.log.jsonl  append-only event log with prompt/context token sizes
-```
-
-If the process dies during a chunk, resume from the Markdown path:
-
-```bash
-uv run python main.py resume digestion.md
-```
-
-Resume marks any previously running chunk as interrupted, restores the planner
-state, lets you split or exclude the failed chunk, and continues from the first
-incomplete chunk while preserving completed summaries, memory deltas, image
-notes, and rolling memory.
-
-Rolling memory is append-first. Each chunk returns a `MEMORY_DELTA` containing
-only durable new facts; the runner appends that delta to the existing memory and
-persists the ordered deltas separately. Routine compaction is avoided. Emergency
-compaction is only used when the final prompt would otherwise exceed the safe
-input budget.
-
-The final pass uses a larger generation budget than local chunk passes and asks
-for a detailed structured digest rather than a short abstract.
-
-## Automatic Digestion
-
-For notebook or Colab-style usage, import the automatic handle and pass source
-and output paths:
-
-```python
-from gen26 import digest_auto
-
-digest_auto("attention.tar.gz", "attention.md")
-```
-
-The automatic plan bundles each included top-level paper node into one chunk,
-while preserving parser defaults such as bibliography exclusion. It prints the
-full chunk list and token budget before generation starts. If any top-level
-chunk exceeds the safe chunk text budget, it raises before streaming model
-output.
-
-The same sidecar files are written next to the output:
-
-```text
-attention.md
-attention.final.md
-attention.json
-attention.log.jsonl
-```
-
-The CLI shortcut uses the same function:
-
-```bash
-uv run python main.py digest-auto attention.tar.gz --output attention.md
-```
-
-Unsectioned top-level paragraphs are treated as front matter and excluded by
-default when the paper has real sections. Normal paragraph prose inside sections
-is still included.
+The planner lets you walk the paper tree, include or exclude subtrees, and
+choose whether a node is bundled into one prompt or split into children.
 
 Planner keys:
 
@@ -127,6 +39,67 @@ Enter         accept plan and continue
 q             quit
 ```
 
+## Python Auto Run
+
+For notebook, Colab, or non-interactive use, import the automatic handle:
+
+```python
+from gen26 import digest_auto
+
+digest_auto("attention.tar.gz", "attention.md")
+```
+
+The automatic plan bundles each included top-level paper node into one chunk and
+preserves parser defaults such as bibliography exclusion. It prints the complete
+chunk list and token budget before generation starts. If any top-level chunk is
+too large, it raises before streaming model output.
+
+## Outputs
+
+Each run writes these files next to the requested Markdown output:
+
+```text
+attention.md         streamed chunk outputs and final digest
+attention.final.md   final digest only, suitable for presentation
+attention.json       run state, plan, chunk statuses, memory, image notes
+attention.log.jsonl  append-only event log with prompt/context token sizes
+```
+
+Resume marks any previously running chunk as interrupted, restores the planner
+state, lets you split or exclude failed chunks, and continues from the first
+incomplete chunk while preserving completed summaries, memory deltas, image
+notes, and rolling memory.
+
+## Runtime
+
+The runtime uses low-level `gm.text.Sampler` directly and formats each request
+as one explicit Gemma instruction prompt. JAX memory environment variables are
+set before importing Gemma/JAX:
+
+```text
+XLA_PYTHON_CLIENT_MEM_FRACTION=1.0
+XLA_PYTHON_CLIENT_ALLOCATOR=vmm
+```
+
+Rolling memory is append-first. Each chunk returns a `MEMORY_DELTA` containing
+only durable new facts; the runner appends that delta to existing memory and
+persists ordered deltas separately. Routine compaction is avoided. Emergency
+compaction is only used when the final prompt would otherwise exceed the safe
+input budget.
+
+The final pass uses a larger generation budget than local chunk passes and asks
+for a detailed structured digest rather than a short abstract.
+
+## LaTeX And Images
+
+The parser uses `pylatexenc` to build the section/environment structure. It
+resolves `\input{...}` and `\include{...}`, records labels, references,
+captions, figures, token counts, and image paths on a `PaperNode` tree.
+
+Unsectioned top-level paragraphs are treated as front matter and excluded by
+default when the paper has real sections. Normal paragraph prose inside sections
+is still included. Bibliography environments are excluded by default.
+
 Figures referenced by `\includegraphics{...}` are sent with the owning chunk,
 including figures found inside bundled descendant nodes. Raster images are
 loaded with OpenCV. PDF figures are rendered with `pdftoppm -scale-to 896`,
@@ -134,6 +107,7 @@ then padded to Gemma 3 4B's declared `896x896` image input without changing
 aspect ratio. If a chunk owns multiple images, the runner reads them one at a
 time in an image prepass and feeds the resulting visual notes into the main
 chunk prompt, avoiding multi-image vision batches.
+
 Image prepass prompts ask what the figure contributes to the paper, not for an
 exhaustive visual description. Image notes are persisted separately and are
 merged into the final synthesis.
