@@ -785,7 +785,8 @@ pdftoppm -f 1 -singlefile -scale-to <image_size> -png ...
 
 The rendered PNG is read with OpenCV and converted to RGB.
 
-Returns `None` if `pdftoppm` fails or OpenCV cannot read the rendered PNG.
+Returns `None` if `pdftoppm` is missing, `pdftoppm` fails, or OpenCV cannot
+read the rendered PNG.
 
 #### `fit_image_to_square(image, image_size, np)`
 

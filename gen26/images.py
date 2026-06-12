@@ -72,22 +72,25 @@ def render_pdf_first_page(path: Path, image_size: int):
 
     with tempfile.TemporaryDirectory(prefix="gen26-pdf-") as temp_dir:
         output_prefix = Path(temp_dir) / "page"
-        result = subprocess.run(
-            [
-                "pdftoppm",
-                "-f",
-                "1",
-                "-singlefile",
-                "-scale-to",
-                str(image_size),
-                "-png",
-                str(path),
-                str(output_prefix),
-            ],
-            check=False,
-            text=True,
-            capture_output=True,
-        )
+        try:
+            result = subprocess.run(
+                [
+                    "pdftoppm",
+                    "-f",
+                    "1",
+                    "-singlefile",
+                    "-scale-to",
+                    str(image_size),
+                    "-png",
+                    str(path),
+                    str(output_prefix),
+                ],
+                check=False,
+                text=True,
+                capture_output=True,
+            )
+        except FileNotFoundError:
+            return None
         if result.returncode != 0:
             return None
         rendered = output_prefix.with_suffix(".png")

@@ -120,6 +120,15 @@ aspect ratio. If a chunk owns multiple images, the runner reads them one at a
 time in an image prepass and feeds the resulting visual notes into the main
 chunk prompt, avoiding multi-image vision batches.
 
+`pdftoppm` is a system executable from Poppler, not a Python package. On Colab,
+install it with:
+
+```bash
+apt-get update && apt-get install -y poppler-utils
+```
+
+If `pdftoppm` is missing, PDF figures are skipped and the digest continues.
+
 Image prepass prompts ask what the figure contributes to the paper, not for an
 exhaustive visual description. Image notes are persisted separately and are
 merged into the final synthesis.

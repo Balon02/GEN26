@@ -358,6 +358,11 @@ pdftoppm -f 1 -singlefile -scale-to <image_size> -png <path> <output_prefix>
 Only the first page is rendered. `image_size` comes from the Gemma model's
 vision encoder configuration, currently expected to be `896`.
 
+`pdftoppm` is a system executable from Poppler, not a Python package. On Colab
+or Debian-like systems, install it with `apt-get install -y poppler-utils`.
+If the executable is missing, GEN26 treats the PDF as a skipped image and
+continues digesting the paper.
+
 All images are converted to RGB, resized to fit inside an `image_size x
 image_size` square while preserving aspect ratio, and pasted onto a white
 square canvas. This avoids wasting resources on oversized rendering while still
