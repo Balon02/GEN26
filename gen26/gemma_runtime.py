@@ -6,8 +6,8 @@ from pathlib import Path
 
 
 # Match smoke_test_g3.py before importing Gemma/JAX.
-os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "1.0"
-os.environ["XLA_PYTHON_CLIENT_ALLOCATOR"] = "vmm"
+os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "1.0")
+os.environ.setdefault("XLA_PYTHON_CLIENT_ALLOCATOR", "vmm")
 
 import kagglehub  # noqa: E402
 import numpy as np  # noqa: E402
