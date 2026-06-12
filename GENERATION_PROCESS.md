@@ -14,6 +14,12 @@ The interactive CLI path is:
 uv run python main.py digest attention.tar.gz --output attention.md
 ```
 
+On smaller GPUs, lower the runtime cache length:
+
+```bash
+uv run python main.py digest attention.tar.gz --output attention.md --max-tokens 8192
+```
+
 This path loads Gemma, parses the paper, opens the curses planner, lets the user
 choose the chunking structure, then runs generation.
 
@@ -21,6 +27,12 @@ The resume path is:
 
 ```bash
 uv run python main.py resume attention.md
+```
+
+Resume accepts the same runtime knob:
+
+```bash
+uv run python main.py resume attention.md --max-tokens 8192
 ```
 
 This path loads the previous JSON run state associated with `attention.md`,
@@ -34,7 +46,7 @@ The non-interactive Python path is:
 ```python
 from gen26 import digest_auto
 
-digest_auto("attention.tar.gz", "attention.md")
+digest_auto("attention.tar.gz", "attention.md", max_tokens=8192)
 ```
 
 This path does not open the planner. It marks every included top-level child of
@@ -66,8 +78,10 @@ setup discovered during development.
 3. Builds a multimodal `gm.nn.Gemma3_4B(text_only=False)` model.
 4. Loads model parameters with `gm.ckpts.load_params()`.
 5. Loads `gm.text.Gemma3Tokenizer`.
-6. Reads the model's declared vision encoder size and requires square input.
-7. Creates two low-level `gm.text.Sampler` instances:
+6. Derives the usable input budget from the configured `max_tokens` cache
+   length.
+7. Reads the model's declared vision encoder size and requires square input.
+8. Creates two low-level `gm.text.Sampler` instances:
    - `self.sampler` for normal chunk and image-pass generation, with
      `max_out_length=768`.
    - `self.final_sampler` for the final product, with `max_out_length=3072`.
@@ -240,13 +254,27 @@ chunk index, token count, and title of each over-budget chunk.
 
 ## Token Budget
 
-The runtime currently uses:
+The runtime has one public memory/context knob: `max_tokens`.
+
+`max_tokens` maps directly to Gemma sampler `cache_length`. The default is
+`10240`. This preserves the previous working configuration.
+
+The usable input budget is derived from that cache length:
 
 ```text
-cache_length = 10240
-safe_input_tokens = 7800
 max_output_tokens = 768
 final_output_tokens = 3072
+safe_input_tokens = min(7800, max_tokens - 2440)
+```
+
+The constant `2440` is the reserve implied by the original configuration:
+`10240 cache length - 7800 usable input`.
+
+For example:
+
+```text
+max_tokens=10240 -> safe_input_tokens=7800
+max_tokens=8192  -> safe_input_tokens=5752
 ```
 
 `TokenBudget` reserves room inside the safe input budget:

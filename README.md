@@ -15,6 +15,14 @@ Run the interactive curses planner:
 uv run python main.py digest attention.tar.gz --output attention.md
 ```
 
+On smaller GPUs, lower the Gemma sampler cache length with the single runtime
+knob:
+
+```bash
+uv run python main.py digest attention.tar.gz --output attention.md --max-tokens 8192
+uv run python main.py resume attention.md --max-tokens 8192
+```
+
 Resume an interrupted run from the Markdown output path:
 
 ```bash
@@ -46,7 +54,7 @@ For notebook, Colab, or non-interactive use, import the automatic handle:
 ```python
 from gen26 import digest_auto
 
-digest_auto("attention.tar.gz", "attention.md")
+digest_auto("attention.tar.gz", "attention.md", max_tokens=8192)
 ```
 
 The automatic plan bundles each included top-level paper node into one chunk and
@@ -80,6 +88,10 @@ set before importing Gemma/JAX:
 XLA_PYTHON_CLIENT_MEM_FRACTION=1.0
 XLA_PYTHON_CLIENT_ALLOCATOR=vmm
 ```
+
+The default `max_tokens` is `10240`, which produces the previous safe input
+budget of `7800` tokens. Lower values keep output, rolling-memory, instruction,
+and image settings fixed while reducing only the usable input budget.
 
 Rolling memory is append-first. Each chunk returns a `MEMORY_DELTA` containing
 only durable new facts; the runner appends that delta to existing memory and

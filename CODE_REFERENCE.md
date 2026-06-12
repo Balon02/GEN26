@@ -78,7 +78,7 @@ Stores the runtime object. The runtime is expected to expose
 Returns `self.runtime.count_tokens(text)`. This means parse-time token counts
 use the same tokenizer that generation will use.
 
-#### `digest_auto(source, output)`
+#### `digest_auto(source, output, max_tokens=10240)`
 
 Runs the entire digestion process without opening the curses planner.
 
@@ -87,7 +87,8 @@ Detailed behavior:
 1. Lazily imports `digest_chunks`, `GemmaDigestRuntime`, and `RunStore`.
    This avoids loading Gemma/JAX merely because `gen26.auto` was imported.
 2. Converts `source` and `output` into `Path` objects.
-3. Creates `GemmaDigestRuntime`, which loads the model, tokenizer, and samplers.
+3. Creates `GemmaDigestRuntime(max_tokens=max_tokens)`, which loads the model,
+   tokenizer, and samplers.
 4. Loads the LaTeX source with `load_latex_source()`.
 5. Parses the source into a `PaperNode` tree using `RuntimeTokenCounter`.
 6. Builds a `TokenBudget` from runtime cache and safe input limits.
@@ -133,6 +134,10 @@ It defines two subcommands:
 - `digest SOURCE --output OUTPUT`
 - `resume OUTPUT`
 
+Both commands accept `--max-tokens`, the single runtime knob for lowering Gemma
+sampler cache length on smaller GPUs. Lowering this value reduces usable input
+context while keeping other budget reservations fixed.
+
 The parser has no debug tokenizer/tree/budget subcommands after cleanup.
 
 #### `add_digest_args(parser)`
@@ -141,6 +146,15 @@ Adds the shared `--output` option for commands that create a Markdown digestion
 file.
 
 `--output` defaults to `digestion.md` and is parsed as a `Path`.
+
+#### `add_runtime_args(parser)`
+
+Adds `--max-tokens`.
+
+The argparse default is `None`. New digest runs resolve that to `10240`.
+Resume resolves it to the stored cache length from the previous run unless the
+user explicitly passes a new value. The resolved value is passed into
+`GemmaDigestRuntime` as the sampler cache length.
 
 #### `main(argv=None)`
 
@@ -180,7 +194,7 @@ Runs a fresh interactive digestion.
 Detailed behavior:
 
 1. Lazily imports `digest_chunks` and `GemmaDigestRuntime`.
-2. Initializes Gemma runtime.
+2. Initializes Gemma runtime with `args.max_tokens`.
 3. Loads the requested LaTeX source.
 4. Parses it into a token-counted paper tree.
 5. Builds a `TokenBudget` from runtime limits.
@@ -203,7 +217,7 @@ Detailed behavior:
 2. Creates `RunStore(args.output)`.
 3. Loads the associated `.json` state file.
 4. Marks any `running` chunks as `interrupted`.
-5. Initializes Gemma runtime.
+5. Initializes Gemma runtime with `args.max_tokens`.
 6. Reopens the original source path stored in run state.
 7. Reparses the source into a fresh tree.
 8. Applies saved include and digest-mode node states with `apply_node_states()`.
@@ -808,11 +822,48 @@ Model identifier:
 google/gemma-3/flax/gemma3-4b-it
 ```
 
+#### `DEFAULT_CACHE_LENGTH`
+
+Default Gemma sampler cache length, `10240`.
+
+#### `DEFAULT_SAFE_INPUT_TOKENS`
+
+Default usable prompt-input budget, `7800`.
+
+#### `CACHE_TO_INPUT_RESERVE`
+
+Fixed reserve between cache length and usable input budget. It is computed from
+the default configuration as `10240 - 7800 = 2440`.
+
+#### `MAX_OUTPUT_TOKENS`
+
+Normal local generation output cap, `768`.
+
+#### `FINAL_OUTPUT_TOKENS`
+
+Final synthesis output cap, `3072`.
+
+#### `safe_input_tokens_for_cache(cache_length)`
+
+Derives usable input context from the single public cache-size knob.
+
+It returns:
+
+```text
+min(DEFAULT_SAFE_INPUT_TOKENS, cache_length - CACHE_TO_INPUT_RESERVE)
+```
+
+Lowering `max_tokens` therefore lowers only the usable input budget. Output
+limits, rolling-memory reservation, instruction reservation, and image handling
+remain fixed.
+
+Raises `ValueError` when the cache length leaves no usable input context.
+
 #### `GemmaDigestRuntime`
 
 Runtime facade used by the rest of the package.
 
-##### `GemmaDigestRuntime.__init__(self)`
+##### `GemmaDigestRuntime.__init__(self, max_tokens=DEFAULT_CACHE_LENGTH)`
 
 Initializes the model stack.
 
@@ -823,7 +874,8 @@ It:
 - builds `Gemma3_4B(text_only=False)`,
 - loads params,
 - loads tokenizer,
-- configures context/output/image sizes,
+- configures cache length, derived safe input budget, output sizes, and image
+  size,
 - verifies square vision input,
 - creates the normal sampler,
 - creates the larger final-output sampler.
@@ -833,8 +885,8 @@ Important attributes:
 - `model`
 - `params`
 - `tokenizer`
-- `cache_length`
-- `safe_input_tokens`
+- `cache_length`, set from `max_tokens`
+- `safe_input_tokens`, derived from `max_tokens`
 - `max_output_tokens`
 - `final_output_tokens`
 - `image_height`

@@ -17,10 +17,30 @@ from gemma import gm  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 GEMMA_MODEL = "google/gemma-3/flax/gemma3-4b-it"
+DEFAULT_CACHE_LENGTH = 10240
+DEFAULT_SAFE_INPUT_TOKENS = 7800
+CACHE_TO_INPUT_RESERVE = DEFAULT_CACHE_LENGTH - DEFAULT_SAFE_INPUT_TOKENS
+MAX_OUTPUT_TOKENS = 768
+FINAL_OUTPUT_TOKENS = 3072
+
+
+def safe_input_tokens_for_cache(cache_length: int) -> int:
+    """Derive usable prompt budget from the single runtime cache-size knob."""
+
+    safe_input_tokens = min(
+        DEFAULT_SAFE_INPUT_TOKENS,
+        cache_length - CACHE_TO_INPUT_RESERVE,
+    )
+    if safe_input_tokens <= 0:
+        raise ValueError(
+            f"max_tokens={cache_length} is too small; it leaves no usable "
+            "input context after the fixed cache reserve."
+        )
+    return safe_input_tokens
 
 
 class GemmaDigestRuntime:
-    def __init__(self) -> None:
+    def __init__(self, max_tokens: int = DEFAULT_CACHE_LENGTH) -> None:
         load_dotenv(str(REPO_ROOT / ".env"))
 
         print("INIT", flush=True)
@@ -33,10 +53,10 @@ class GemmaDigestRuntime:
         self.params = gm.ckpts.load_params(ckpt_path)
         print("TOKENIZER_LOAD", flush=True)
         self.tokenizer = gm.text.Gemma3Tokenizer(tokenizer_path)
-        self.cache_length = 10240
-        self.safe_input_tokens = 7800
-        self.max_output_tokens = 768
-        self.final_output_tokens = 3072
+        self.cache_length = max_tokens
+        self.safe_input_tokens = safe_input_tokens_for_cache(max_tokens)
+        self.max_output_tokens = MAX_OUTPUT_TOKENS
+        self.final_output_tokens = FINAL_OUTPUT_TOKENS
         self.image_height = self.model.config.vision_encoder.image_height
         self.image_width = self.model.config.vision_encoder.image_width
         if self.image_height != self.image_width:

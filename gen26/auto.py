@@ -21,7 +21,11 @@ class RuntimeTokenCounter:
         return self.runtime.count_tokens(text)
 
 
-def digest_auto(source: str | Path, output: str | Path) -> DigestionResult:
+def digest_auto(
+    source: str | Path,
+    output: str | Path,
+    max_tokens: int = 10240,
+) -> DigestionResult:
     """Digest a LaTeX paper without an interactive planner.
 
     The automatic plan bundles each included top-level child of the paper root
@@ -36,7 +40,7 @@ def digest_auto(source: str | Path, output: str | Path) -> DigestionResult:
 
     source_path = Path(source)
     output_path = Path(output)
-    runtime = GemmaDigestRuntime()
+    runtime = GemmaDigestRuntime(max_tokens=max_tokens)
     loaded_source = load_latex_source(source_path)
     try:
         root = parse_loaded_source(loaded_source, RuntimeTokenCounter(runtime))

@@ -9,6 +9,9 @@ from gen26.run_store import RunStore, apply_node_states
 from gen26.terminal_planner import terminal_plan
 
 
+DEFAULT_MAX_TOKENS = 10240
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="gen26",
@@ -22,12 +25,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     digest_parser.add_argument("source", type=Path, help=".tex file, directory, or .tar.gz")
     add_digest_args(digest_parser)
+    add_runtime_args(digest_parser)
 
     resume_parser = subparsers.add_parser(
         "resume",
         help="Resume a previous digestion run from its Markdown output path.",
     )
     resume_parser.add_argument("output", type=Path, help="Existing Markdown output path.")
+    add_runtime_args(resume_parser)
     return parser
 
 
@@ -37,6 +42,20 @@ def add_digest_args(parser: argparse.ArgumentParser) -> None:
         type=Path,
         default=Path("digestion.md"),
         help="Markdown file that receives streamed chunk outputs and final abstract.",
+    )
+
+
+def add_runtime_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--max-tokens",
+        type=int,
+        default=None,
+        help=(
+            "Gemma sampler cache length. Lower this on smaller GPUs; usable "
+            "input context is derived from it while other budget reservations "
+            "stay fixed. Defaults to 10240 for new runs and to the stored "
+            "cache length when resuming."
+        ),
     )
 
 
@@ -50,6 +69,16 @@ def main(argv: list[str] | None = None) -> int:
 
     parser.error(f"Unknown command: {args.command}")
     return 2
+
+
+def max_tokens_from_args(args, state: dict | None = None) -> int:
+    if args.max_tokens is not None:
+        return args.max_tokens
+    if state is not None:
+        stored = state.get("runtime", {}).get("cache_length")
+        if stored is not None:
+            return int(stored)
+    return DEFAULT_MAX_TOKENS
 
 
 class RuntimeTokenCounter:
@@ -66,7 +95,7 @@ def run_digest(args) -> int:
     from gen26.digestion import digest_chunks
     from gen26.gemma_runtime import GemmaDigestRuntime
 
-    runtime = GemmaDigestRuntime()
+    runtime = GemmaDigestRuntime(max_tokens=max_tokens_from_args(args))
     source = load_latex_source(args.source)
     try:
         root = parse_loaded_source(source, RuntimeTokenCounter(runtime))
@@ -99,7 +128,7 @@ def run_resume(args) -> int:
     state = store.load()
     store.mark_interrupted_chunks()
 
-    runtime = GemmaDigestRuntime()
+    runtime = GemmaDigestRuntime(max_tokens=max_tokens_from_args(args, state))
     source_path = Path(state["source"])
     source = load_latex_source(source_path)
     try:
