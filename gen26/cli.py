@@ -3,13 +3,14 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from gen26.chunking import TokenBudget, format_budget_report
+from gen26.chunking import format_budget_report, make_token_budget
 from gen26.latex_parser import load_latex_source, parse_loaded_source
 from gen26.run_store import RunStore, apply_node_states
 from gen26.terminal_planner import terminal_plan
 
 
 DEFAULT_MAX_TOKENS = 10240
+DEFAULT_CONTEXT_SCALE = 1.0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -51,10 +52,21 @@ def add_runtime_args(parser: argparse.ArgumentParser) -> None:
         type=int,
         default=None,
         help=(
-            "Gemma sampler cache length. Lower this on smaller GPUs; usable "
-            "input context is derived from it while other budget reservations "
-            "stay fixed. Defaults to 10240 for new runs and to the stored "
-            "cache length when resuming."
+            "Gemma sampler cache length. Lower this on smaller GPUs or raise "
+            "it on larger accelerators; usable input context is derived from "
+            "it. Defaults to 10240 for new runs and to the stored cache "
+            "length when resuming."
+        ),
+    )
+    parser.add_argument(
+        "--context-scale",
+        type=float,
+        default=None,
+        help=(
+            "Multiplier for fixed context-token allocations such as rolling "
+            "memory, instruction reservation, memory deltas, image notes, and "
+            "final prompt fitting limits. Defaults to 1.0 for new runs and to "
+            "the stored value when resuming."
         ),
     )
 
@@ -81,6 +93,18 @@ def max_tokens_from_args(args, state: dict | None = None) -> int:
     return DEFAULT_MAX_TOKENS
 
 
+def context_scale_from_args(args, state: dict | None = None) -> float:
+    if args.context_scale is not None:
+        if args.context_scale <= 0:
+            raise ValueError("--context-scale must be greater than zero.")
+        return args.context_scale
+    if state is not None:
+        stored = state.get("budget", {}).get("context_scale")
+        if stored is not None:
+            return float(stored)
+    return DEFAULT_CONTEXT_SCALE
+
+
 class RuntimeTokenCounter:
     name = "gemma3"
 
@@ -96,12 +120,14 @@ def run_digest(args) -> int:
     from gen26.gemma_runtime import GemmaDigestRuntime
 
     runtime = GemmaDigestRuntime(max_tokens=max_tokens_from_args(args))
+    context_scale = context_scale_from_args(args)
     source = load_latex_source(args.source)
     try:
         root = parse_loaded_source(source, RuntimeTokenCounter(runtime))
-        budget = TokenBudget(
+        budget = make_token_budget(
             cache_length=runtime.cache_length,
             usable_input_tokens=runtime.safe_input_tokens,
+            context_scale=context_scale,
         )
         chunks = terminal_plan(root, budget)
         print(format_budget_report(chunks, budget), flush=True)
@@ -112,6 +138,7 @@ def run_digest(args) -> int:
             chunks,
             output_file=args.output,
             rolling_memory_token_limit=budget.rolling_memory_tokens,
+            context_scale=context_scale,
             run_store=store,
         )
         print(f"\nMarkdown output: {args.output}", flush=True)
@@ -129,14 +156,16 @@ def run_resume(args) -> int:
     store.mark_interrupted_chunks()
 
     runtime = GemmaDigestRuntime(max_tokens=max_tokens_from_args(args, state))
+    context_scale = context_scale_from_args(args, state)
     source_path = Path(state["source"])
     source = load_latex_source(source_path)
     try:
         root = parse_loaded_source(source, RuntimeTokenCounter(runtime))
         apply_node_states(root, state.get("node_states", []))
-        budget = TokenBudget(
+        budget = make_token_budget(
             cache_length=runtime.cache_length,
             usable_input_tokens=runtime.safe_input_tokens,
+            context_scale=context_scale,
         )
         chunks = terminal_plan(root, budget)
         prefix = store.update_plan(root, chunks)
@@ -150,6 +179,7 @@ def run_resume(args) -> int:
             chunks[prefix:],
             output_file=args.output,
             rolling_memory_token_limit=budget.rolling_memory_tokens,
+            context_scale=context_scale,
             run_store=store,
             initial_memory=memory,
             initial_summaries=summaries,

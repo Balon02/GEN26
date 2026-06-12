@@ -78,7 +78,7 @@ Stores the runtime object. The runtime is expected to expose
 Returns `self.runtime.count_tokens(text)`. This means parse-time token counts
 use the same tokenizer that generation will use.
 
-#### `digest_auto(source, output, max_tokens=10240)`
+#### `digest_auto(source, output, max_tokens=10240, context_scale=1.0)`
 
 Runs the entire digestion process without opening the curses planner.
 
@@ -91,7 +91,8 @@ Detailed behavior:
    tokenizer, and samplers.
 4. Loads the LaTeX source with `load_latex_source()`.
 5. Parses the source into a `PaperNode` tree using `RuntimeTokenCounter`.
-6. Builds a `TokenBudget` from runtime cache and safe input limits.
+6. Builds a scaled `TokenBudget` from runtime cache, safe input limits, and
+   `context_scale`.
 7. Calls `plan_top_level_chunks()` to mark root children as whole chunks.
 8. Prints the formatted token budget and chunk list before generation.
 9. Creates a `RunStore` next to the output Markdown file.
@@ -134,9 +135,8 @@ It defines two subcommands:
 - `digest SOURCE --output OUTPUT`
 - `resume OUTPUT`
 
-Both commands accept `--max-tokens`, the single runtime knob for lowering Gemma
-sampler cache length on smaller GPUs. Lowering this value reduces usable input
-context while keeping other budget reservations fixed.
+Both commands accept `--max-tokens`, the runtime knob for lowering Gemma sampler
+cache length on smaller GPUs or raising it on larger accelerators.
 
 The parser has no debug tokenizer/tree/budget subcommands after cleanup.
 
@@ -851,12 +851,13 @@ Derives usable input context from the single public cache-size knob.
 It returns:
 
 ```text
-min(DEFAULT_SAFE_INPUT_TOKENS, cache_length - CACHE_TO_INPUT_RESERVE)
+cache_length - CACHE_TO_INPUT_RESERVE
 ```
 
-Lowering `max_tokens` therefore lowers only the usable input budget. Output
-limits, rolling-memory reservation, instruction reservation, and image handling
-remain fixed.
+Changing `max_tokens` therefore moves the usable input budget up or down while
+preserving the fixed reserve implied by the original configuration. Output
+limits and image token accounting remain separate. Fixed context allocations
+can be scaled with `context_scale`.
 
 Raises `ValueError` when the cache length leaves no usable input context.
 

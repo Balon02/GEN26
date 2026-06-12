@@ -24,15 +24,25 @@ NODE_LEVELS = {
     "definition": 4,
     "bibliography": 4,
 }
+DEFAULT_RESERVED_OUTPUT_TOKENS = 768
+DEFAULT_ROLLING_MEMORY_TOKENS = 900
+DEFAULT_INSTRUCTION_TOKENS = 350
+
+
+def scaled_token_count(value: int, context_scale: float) -> int:
+    if context_scale <= 0:
+        raise ValueError("context_scale must be greater than zero.")
+    return max(1, round(value * context_scale))
 
 
 @dataclass
 class TokenBudget:
     cache_length: int = 10240
     usable_input_tokens: int = 8500
-    reserved_output_tokens: int = 768
-    rolling_memory_tokens: int = 900
-    instruction_tokens: int = 350
+    reserved_output_tokens: int = DEFAULT_RESERVED_OUTPUT_TOKENS
+    rolling_memory_tokens: int = DEFAULT_ROLLING_MEMORY_TOKENS
+    instruction_tokens: int = DEFAULT_INSTRUCTION_TOKENS
+    context_scale: float = 1.0
 
     @property
     def chunk_text_tokens(self) -> int:
@@ -41,6 +51,30 @@ class TokenBudget:
             - self.rolling_memory_tokens
             - self.instruction_tokens
         )
+
+
+def make_token_budget(
+    cache_length: int,
+    usable_input_tokens: int,
+    context_scale: float = 1.0,
+) -> TokenBudget:
+    return TokenBudget(
+        cache_length=cache_length,
+        usable_input_tokens=usable_input_tokens,
+        reserved_output_tokens=scaled_token_count(
+            DEFAULT_RESERVED_OUTPUT_TOKENS,
+            context_scale,
+        ),
+        rolling_memory_tokens=scaled_token_count(
+            DEFAULT_ROLLING_MEMORY_TOKENS,
+            context_scale,
+        ),
+        instruction_tokens=scaled_token_count(
+            DEFAULT_INSTRUCTION_TOKENS,
+            context_scale,
+        ),
+        context_scale=context_scale,
+    )
 
 
 @dataclass
@@ -152,6 +186,7 @@ def format_budget_report(chunks: list[ChunkPlan], budget: TokenBudget) -> str:
         f"  instructions:          {budget.instruction_tokens}",
         f"  rolling memory:        {budget.rolling_memory_tokens}",
         f"  reserved output:       {budget.reserved_output_tokens}",
+        f"  context scale:         {budget.context_scale}",
         f"  chunk text limit:      {budget.chunk_text_tokens}",
         "",
         "Chunks",

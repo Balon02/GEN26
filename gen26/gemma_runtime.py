@@ -27,10 +27,7 @@ FINAL_OUTPUT_TOKENS = 3072
 def safe_input_tokens_for_cache(cache_length: int) -> int:
     """Derive usable prompt budget from the single runtime cache-size knob."""
 
-    safe_input_tokens = min(
-        DEFAULT_SAFE_INPUT_TOKENS,
-        cache_length - CACHE_TO_INPUT_RESERVE,
-    )
+    safe_input_tokens = cache_length - CACHE_TO_INPUT_RESERVE
     if safe_input_tokens <= 0:
         raise ValueError(
             f"max_tokens={cache_length} is too small; it leaves no usable "

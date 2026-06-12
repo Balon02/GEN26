@@ -305,7 +305,7 @@ class RunStore:
         raise ValueError(f"No chunk {index}")
 
 
-def budget_to_dict(budget: TokenBudget) -> dict[str, int]:
+def budget_to_dict(budget: TokenBudget) -> dict[str, int | float]:
     return {
         "cache_length": budget.cache_length,
         "usable_input_tokens": budget.usable_input_tokens,
@@ -313,6 +313,7 @@ def budget_to_dict(budget: TokenBudget) -> dict[str, int]:
         "rolling_memory_tokens": budget.rolling_memory_tokens,
         "instruction_tokens": budget.instruction_tokens,
         "chunk_text_tokens": budget.chunk_text_tokens,
+        "context_scale": budget.context_scale,
     }
 
 

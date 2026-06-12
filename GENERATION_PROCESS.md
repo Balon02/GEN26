@@ -20,6 +20,14 @@ On smaller GPUs, lower the runtime cache length:
 uv run python main.py digest attention.tar.gz --output attention.md --max-tokens 8192
 ```
 
+On larger accelerators, raise the cache length and scale fixed context
+allocations:
+
+```bash
+uv run python main.py digest attention.tar.gz --output attention_tpu.md \
+  --max-tokens 16384 --context-scale 2
+```
+
 This path loads Gemma, parses the paper, opens the curses planner, lets the user
 choose the chunking structure, then runs generation.
 
@@ -264,7 +272,7 @@ The usable input budget is derived from that cache length:
 ```text
 max_output_tokens = 768
 final_output_tokens = 3072
-safe_input_tokens = min(7800, max_tokens - 2440)
+safe_input_tokens = max_tokens - 2440
 ```
 
 The constant `2440` is the reserve implied by the original configuration:
@@ -275,6 +283,7 @@ For example:
 ```text
 max_tokens=10240 -> safe_input_tokens=7800
 max_tokens=8192  -> safe_input_tokens=5752
+max_tokens=16384 -> safe_input_tokens=13944
 ```
 
 `TokenBudget` reserves room inside the safe input budget:

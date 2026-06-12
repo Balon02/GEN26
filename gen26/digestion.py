@@ -4,16 +4,73 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from gen26.chunking import ChunkPlan
+from gen26.chunking import scaled_token_count
 from gen26.images import load_chunk_images
 from gen26.paper_tree import IncludeStatus, PaperNode
 
 IMAGE_TOKENS = 256
 MEMORY_DELTA_TOKEN_LIMIT = 260
 MAX_RAW_IMAGES_PER_CHUNK_CALL = 1
+CHUNK_SUMMARY_TOKEN_LIMIT = 350
+IMAGE_CONTEXT_TOKEN_LIMIT = 900
+IMAGE_SUMMARY_TOKEN_LIMIT = 180
 FINAL_SUMMARY_TOKEN_LIMIT = 700
 FINAL_IMAGE_NOTE_TOKEN_LIMIT = 1200
 FINAL_MEMORY_DELTA_TOKEN_LIMIT = 3000
 EMERGENCY_MEMORY_TARGET_TOKENS = 2200
+FINAL_SUMMARY_FALLBACK_LIMITS = (500, 350, 220)
+FINAL_COMPACTED_SUMMARY_LIMITS = (350, 220, 140)
+FINAL_COMPACTED_MEMORY_DELTA_TOKEN_LIMIT = 1800
+FINAL_COMPACTED_IMAGE_NOTE_TOKEN_LIMIT = 800
+MEMORY_COMPACTION_MIN_TARGET_TOKENS = 200
+
+
+@dataclass
+class DigestionLimits:
+    memory_delta_tokens: int
+    chunk_summary_tokens: int
+    image_context_tokens: int
+    image_summary_tokens: int
+    final_summary_tokens: int
+    final_image_note_tokens: int
+    final_memory_delta_tokens: int
+    emergency_memory_target_tokens: int
+    final_summary_fallback_tokens: tuple[int, ...]
+    final_compacted_summary_tokens: tuple[int, ...]
+    final_compacted_memory_delta_tokens: int
+    final_compacted_image_note_tokens: int
+    memory_compaction_min_target_tokens: int
+
+
+def make_digestion_limits(context_scale: float = 1.0) -> DigestionLimits:
+    def scale(value: int) -> int:
+        return scaled_token_count(value, context_scale)
+
+    return DigestionLimits(
+        memory_delta_tokens=scale(MEMORY_DELTA_TOKEN_LIMIT),
+        chunk_summary_tokens=scale(CHUNK_SUMMARY_TOKEN_LIMIT),
+        image_context_tokens=scale(IMAGE_CONTEXT_TOKEN_LIMIT),
+        image_summary_tokens=scale(IMAGE_SUMMARY_TOKEN_LIMIT),
+        final_summary_tokens=scale(FINAL_SUMMARY_TOKEN_LIMIT),
+        final_image_note_tokens=scale(FINAL_IMAGE_NOTE_TOKEN_LIMIT),
+        final_memory_delta_tokens=scale(FINAL_MEMORY_DELTA_TOKEN_LIMIT),
+        emergency_memory_target_tokens=scale(EMERGENCY_MEMORY_TARGET_TOKENS),
+        final_summary_fallback_tokens=tuple(
+            scale(value) for value in FINAL_SUMMARY_FALLBACK_LIMITS
+        ),
+        final_compacted_summary_tokens=tuple(
+            scale(value) for value in FINAL_COMPACTED_SUMMARY_LIMITS
+        ),
+        final_compacted_memory_delta_tokens=scale(
+            FINAL_COMPACTED_MEMORY_DELTA_TOKEN_LIMIT
+        ),
+        final_compacted_image_note_tokens=scale(
+            FINAL_COMPACTED_IMAGE_NOTE_TOKEN_LIMIT
+        ),
+        memory_compaction_min_target_tokens=scale(
+            MEMORY_COMPACTION_MIN_TARGET_TOKENS
+        ),
+    )
 
 
 @dataclass
@@ -43,12 +100,14 @@ def digest_chunks(
     chunks: list[ChunkPlan],
     output_file: Path,
     rolling_memory_token_limit: int = 900,
+    context_scale: float = 1.0,
     run_store=None,
     initial_memory: RollingMemory | None = None,
     initial_summaries: list[str] | None = None,
     append_output: bool = False,
     total_chunks: int | None = None,
 ) -> DigestionResult:
+    limits = make_digestion_limits(context_scale)
     memory = initial_memory or RollingMemory()
     chunk_summaries: list[str] = list(initial_summaries or [])
     memory_deltas: list[str] = load_initial_memory_deltas(run_store, chunk_summaries)
@@ -85,6 +144,7 @@ def digest_chunks(
                     chunk,
                     images,
                     output_file,
+                    limits,
                     run_store,
                 )
                 chunk_images = []
@@ -144,11 +204,17 @@ def digest_chunks(
         new_durable_additions = "none"
         try:
             local_summary = extract_section(response, "LOCAL_SUMMARY") or response
-            chunk_summaries.append(bound_text(runtime, local_summary, 350))
+            chunk_summaries.append(
+                bound_text(runtime, local_summary, limits.chunk_summary_tokens)
+            )
 
             memory_delta = extract_section(response, "MEMORY_DELTA")
             if useful_memory_delta(memory_delta):
-                bounded_delta = bound_text(runtime, memory_delta, MEMORY_DELTA_TOKEN_LIMIT)
+                bounded_delta = bound_text(
+                    runtime,
+                    memory_delta,
+                    limits.memory_delta_tokens,
+                )
                 new_durable_additions = bounded_delta
                 memory.text = append_memory_delta(
                     memory.text,
@@ -190,6 +256,7 @@ def digest_chunks(
         chunk_summaries,
         memory_deltas,
         image_notes,
+        limits,
         output_file,
         run_store,
     )
@@ -316,6 +383,7 @@ def digest_images_sequentially(
     chunk: ChunkPlan,
     images,
     output_file: Path,
+    limits: DigestionLimits,
     run_store=None,
 ) -> list[str]:
     append_markdown(
@@ -325,7 +393,7 @@ def digest_images_sequentially(
         "multi-image vision memory pressure.\n\n",
     )
     summaries: list[str] = []
-    context = bound_text(runtime, format_chunk_text(chunk), 900)
+    context = bound_text(runtime, format_chunk_text(chunk), limits.image_context_tokens)
     for index, image in enumerate(images, start=1):
         prompt = build_image_prompt(chunk, image.path.name, context)
         prompt_tokens = count_prompt_tokens(runtime, prompt)
@@ -350,7 +418,7 @@ def digest_images_sequentially(
                 run_store.image_failed(chunk.index, index, image.path.name, exc)
             raise
         summary = extract_section(response or "", "IMAGE_SUMMARY") or response or ""
-        summary = bound_text(runtime, summary.strip(), 180)
+        summary = bound_text(runtime, summary.strip(), limits.image_summary_tokens)
         note = f"Chunk {chunk.index} image {index} ({image.path.name}): {summary}"
         summaries.append(note)
         if run_store is not None:
@@ -389,11 +457,15 @@ def build_final_prompt_that_fits(
     chunk_summaries: list[str],
     memory_deltas: list[str],
     image_notes: list[str],
+    limits: DigestionLimits,
     output_file: Path,
     run_store=None,
 ) -> str:
     memory_text = memory.text
-    for summary_limit in (FINAL_SUMMARY_TOKEN_LIMIT, 500, 350, 220):
+    for summary_limit in (
+        limits.final_summary_tokens,
+        *limits.final_summary_fallback_tokens,
+    ):
         bounded_summaries = [
             bound_text(runtime, summary, summary_limit)
             for summary in chunk_summaries
@@ -401,12 +473,12 @@ def build_final_prompt_that_fits(
         bounded_deltas = bound_list_by_tokens(
             runtime,
             memory_deltas,
-            FINAL_MEMORY_DELTA_TOKEN_LIMIT,
+            limits.final_memory_delta_tokens,
         )
         bounded_images = bound_list_by_tokens(
             runtime,
             image_notes,
-            FINAL_IMAGE_NOTE_TOKEN_LIMIT,
+            limits.final_image_note_tokens,
         )
         prompt = build_final_prompt(
             RollingMemory(memory_text),
@@ -420,16 +492,25 @@ def build_final_prompt_that_fits(
     compacted_memory = compact_memory(
         runtime,
         memory_text,
-        EMERGENCY_MEMORY_TARGET_TOKENS,
+        limits.emergency_memory_target_tokens,
+        limits,
         output_file,
         run_store,
     )
-    for summary_limit in (350, 220, 140):
+    for summary_limit in limits.final_compacted_summary_tokens:
         prompt = build_final_prompt(
             RollingMemory(compacted_memory),
             [bound_text(runtime, summary, summary_limit) for summary in chunk_summaries],
-            bound_list_by_tokens(runtime, memory_deltas, 1800),
-            bound_list_by_tokens(runtime, image_notes, 800),
+            bound_list_by_tokens(
+                runtime,
+                memory_deltas,
+                limits.final_compacted_memory_delta_tokens,
+            ),
+            bound_list_by_tokens(
+                runtime,
+                image_notes,
+                limits.final_compacted_image_note_tokens,
+            ),
         )
         if count_prompt_tokens(runtime, prompt) <= runtime.safe_input_tokens:
             return prompt
@@ -603,11 +684,15 @@ def compact_memory(
     runtime,
     memory_text: str,
     token_limit: int,
+    limits: DigestionLimits,
     output_file: Path,
     run_store=None,
 ) -> str:
     before_tokens = runtime.count_tokens(memory_text)
-    target_tokens = max(200, round(token_limit * 0.65))
+    target_tokens = max(
+        limits.memory_compaction_min_target_tokens,
+        round(token_limit * 0.65),
+    )
     print(
         "\n=== COMPACTING ROLLING MEMORY "
         f"tokens={before_tokens} target~{target_tokens} ===",

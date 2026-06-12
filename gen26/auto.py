@@ -3,7 +3,13 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from gen26.chunking import ChunkPlan, TokenBudget, format_budget_report, pack_chunks
+from gen26.chunking import (
+    ChunkPlan,
+    TokenBudget,
+    format_budget_report,
+    make_token_budget,
+    pack_chunks,
+)
 from gen26.latex_parser import load_latex_source, parse_loaded_source
 from gen26.paper_tree import DigestMode, IncludeStatus, PaperNode
 
@@ -25,6 +31,7 @@ def digest_auto(
     source: str | Path,
     output: str | Path,
     max_tokens: int = 10240,
+    context_scale: float = 1.0,
 ) -> DigestionResult:
     """Digest a LaTeX paper without an interactive planner.
 
@@ -38,15 +45,19 @@ def digest_auto(
     from gen26.gemma_runtime import GemmaDigestRuntime
     from gen26.run_store import RunStore
 
+    if context_scale <= 0:
+        raise ValueError("context_scale must be greater than zero.")
+
     source_path = Path(source)
     output_path = Path(output)
     runtime = GemmaDigestRuntime(max_tokens=max_tokens)
     loaded_source = load_latex_source(source_path)
     try:
         root = parse_loaded_source(loaded_source, RuntimeTokenCounter(runtime))
-        budget = TokenBudget(
+        budget = make_token_budget(
             cache_length=runtime.cache_length,
             usable_input_tokens=runtime.safe_input_tokens,
+            context_scale=context_scale,
         )
         chunks = plan_top_level_chunks(root, budget)
         print(format_budget_report(chunks, budget), flush=True)
@@ -58,6 +69,7 @@ def digest_auto(
             chunks,
             output_file=output_path,
             rolling_memory_token_limit=budget.rolling_memory_tokens,
+            context_scale=context_scale,
             run_store=store,
         )
     finally:

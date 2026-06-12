@@ -23,6 +23,13 @@ uv run python main.py digest attention.tar.gz --output attention.md --max-tokens
 uv run python main.py resume attention.md --max-tokens 8192
 ```
 
+On larger accelerators, raise the cache and scale the fixed context allocations:
+
+```bash
+uv run python main.py digest attention.tar.gz --output attention_tpu.md \
+  --max-tokens 16384 --context-scale 2
+```
+
 Resume an interrupted run from the Markdown output path:
 
 ```bash
@@ -90,8 +97,11 @@ XLA_PYTHON_CLIENT_ALLOCATOR=vmm
 ```
 
 The default `max_tokens` is `10240`, which produces the previous safe input
-budget of `7800` tokens. Lower values keep output, rolling-memory, instruction,
-and image settings fixed while reducing only the usable input budget.
+budget of `7800` tokens. `safe_input_tokens` is derived as
+`max_tokens - 2440`, so lower values shrink usable context and higher values
+expand it. `context_scale` multiplies fixed context allocations such as rolling
+memory, instruction reservation, memory deltas, image-note limits, and final
+prompt fitting limits.
 
 Rolling memory is append-first. Each chunk returns a `MEMORY_DELTA` containing
 only durable new facts; the runner appends that delta to existing memory and
