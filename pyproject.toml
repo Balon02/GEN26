@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12,<3.14"
 dependencies = [
     "gemma>=4.0.1",
-    "jax[cuda12]>=0.10.1",
+    "jax[tpu]>=0.10.1",
     "kagglehub>=1.0.1",
     "opencv-python>=4.13.0.92",
     "orbax-checkpoint>=0.12.0",
